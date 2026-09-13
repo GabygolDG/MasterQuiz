@@ -1,1 +1,521 @@
+<html lang="pt-BR" style="-webkit-tap-highlight-color: transparent; user-select: none; height: 100%; overscroll-behavior: contain; --sekai-bg-color: #1a2b4c;"><head>
+<script>
+(function() {
+  if (typeof CustomEvent === 'function') return;
+  function CustomEvent(event, params) {
+    params = params || { bubbles: false, cancelable: false, detail: null };
+    var evt = document.createEvent('CustomEvent');
+    evt.initCustomEvent(event, params.bubbles, params.cancelable, params.detail);
+    return evt;
+  }
+  CustomEvent.prototype = window.Event && window.Event.prototype;
+  window.CustomEvent = CustomEvent;
+})();
+</script>
 
+<script>
+(function() {
+  // Function to set or update viewport meta tag
+  function ensureViewportMeta() {
+    var viewportMeta = document.querySelector('meta[name="viewport"]');
+    
+    if (!viewportMeta) {
+      // Create viewport meta tag if it doesn't exist
+      viewportMeta = document.createElement('meta');
+      viewportMeta.name = 'viewport';
+      document.head.insertBefore(viewportMeta, document.head.firstChild);
+    }
+    
+    // Set viewport to prevent iOS auto-zoom
+    // width=device-width: Use device width
+    // initial-scale=1.0: Initial zoom level
+    // maximum-scale=1.0: Prevent zooming beyond 1.0
+    // user-scalable=no: Disable user scaling (prevents pinch zoom and auto-zoom on input focus)
+    viewportMeta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+  }
+  
+  // Run immediately if DOM is already ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', ensureViewportMeta);
+  } else {
+    ensureViewportMeta();
+  }
+  
+  // Also ensure it's set when head is ready (in case script runs before head)
+  if (!document.head) {
+    var observer = new MutationObserver(function(mutations) {
+      if (document.head) {
+        ensureViewportMeta();
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.documentElement, { childList: true });
+  }
+})();
+</script>
+
+<script>
+(function() {
+  var originalAddEventListener = EventTarget.prototype.addEventListener;
+  var originalRemoveEventListener = EventTarget.prototype.removeEventListener;
+
+  // ── Tap vs Swipe detection ──
+  // Track pointerdown position; only synthesize click when displacement is small.
+  var ptrDownPos = null;
+  var TAP_THRESHOLD_SQ = 100; // 10px squared
+
+  originalAddEventListener.call(document, 'pointerdown', function(e) {
+    if (e.button !== 0) return;
+    ptrDownPos = { x: e.clientX, y: e.clientY };
+  }, { capture: true, passive: true });
+
+  function isTap(e) {
+    if (!ptrDownPos) return true; // no pointerdown recorded — be safe, treat as tap
+    var dx = e.clientX - ptrDownPos.x;
+    var dy = e.clientY - ptrDownPos.y;
+    return (dx * dx + dy * dy) <= TAP_THRESHOLD_SQ;
+  }
+
+  // ── click → pointerup conversion ──
+  var listenerMap = new WeakMap();
+
+  EventTarget.prototype.addEventListener = function(type, listener, options) {
+    if (type === 'click' && typeof listener === 'function') {
+      var elementMap = listenerMap.get(this);
+      if (!elementMap) {
+        elementMap = new Map();
+        listenerMap.set(this, elementMap);
+      }
+
+      var existingPointerListener = elementMap.get(listener);
+      if (existingPointerListener) {
+        return originalAddEventListener.call(this, 'pointerup', existingPointerListener, options);
+      }
+
+      var pointerupListener = function(e) {
+        if (e.button !== 0) return;
+        if (!isTap(e)) return;
+
+        var clickEvent = new MouseEvent('click', {
+          bubbles: e.bubbles, cancelable: e.cancelable, view: e.view,
+          detail: 1,
+          screenX: e.screenX, screenY: e.screenY,
+          clientX: e.clientX, clientY: e.clientY,
+          ctrlKey: e.ctrlKey, altKey: e.altKey,
+          shiftKey: e.shiftKey, metaKey: e.metaKey,
+          button: e.button, relatedTarget: e.relatedTarget
+        });
+        Object.defineProperty(clickEvent, 'target', { value: e.target, enumerable: true });
+        Object.defineProperty(clickEvent, 'currentTarget', { value: e.currentTarget, enumerable: true });
+
+        try { listener.call(this, clickEvent); } catch (err) {}
+      };
+
+      elementMap.set(listener, pointerupListener);
+      return originalAddEventListener.call(this, 'pointerup', pointerupListener, options);
+    }
+
+    return originalAddEventListener.call(this, type, listener, options);
+  };
+
+  EventTarget.prototype.removeEventListener = function(type, listener, options) {
+    if (type === 'click' && typeof listener === 'function') {
+      var elementMap = listenerMap.get(this);
+      if (elementMap) {
+        var pointerupListener = elementMap.get(listener);
+        if (pointerupListener) {
+          elementMap.delete(listener);
+          return originalRemoveEventListener.call(this, 'pointerup', pointerupListener, options);
+        }
+      }
+    }
+    return originalRemoveEventListener.call(this, type, listener, options);
+  };
+
+  // ── Synthetic click for .onclick compatibility ──
+  // Only dispatch when the gesture is a tap (not a swipe).
+  var SEKAI_SYNTHETIC_KEY = '__sekai_sc';
+
+  originalAddEventListener.call(document, 'pointerup', function(e) {
+    if (e.button !== 0) return;
+    if (!isTap(e)) return;
+    var t = e.target;
+    if (!t || !t.dispatchEvent) return;
+    // Native form controls activate through the click's DEFAULT ACTION, which
+    // the blocker below cannot suppress (stopImmediatePropagation stops
+    // listeners, not default actions). Synthesizing a click here would
+    // activate them twice: a checkbox toggles on, then straight back off, so
+    // a clean tap looks dead. Leave them to the browser's own click.
+    if (t.closest && t.closest('input, select, textarea, option, label')) return;
+
+    var evt = new MouseEvent('click', {
+      bubbles: true, cancelable: true, view: e.view,
+      detail: 1,
+      screenX: e.screenX, screenY: e.screenY,
+      clientX: e.clientX, clientY: e.clientY,
+      ctrlKey: e.ctrlKey, altKey: e.altKey,
+      shiftKey: e.shiftKey, metaKey: e.metaKey,
+      button: 0, relatedTarget: null
+    });
+    Object.defineProperty(evt, SEKAI_SYNTHETIC_KEY, { value: true });
+    t.dispatchEvent(evt);
+  }, false);
+
+  // Deduplicate native clicks: only block when a synthetic click already fired
+  // for this pointer cycle. This prevents double-triggering while letting native
+  // clicks through when the synthetic dispatch didn't run (e.g. pointerup was
+  // stopped before bubbling to document, or the target was skipped above).
+  // Blocking unconditionally would strip inline onclick handlers off the
+  // controls skipped above, since their click no longer has a synthetic twin.
+  var lastSyntheticTs = 0;
+  var DEDUP_MS = 50;
+
+  var _origDispatchEvent = EventTarget.prototype.dispatchEvent;
+  EventTarget.prototype.dispatchEvent = function(evt) {
+    if (evt.type === 'click' && evt[SEKAI_SYNTHETIC_KEY]) {
+      lastSyntheticTs = Date.now();
+    }
+    return _origDispatchEvent.call(this, evt);
+  };
+
+  originalAddEventListener.call(document, 'click', function(e) {
+    if (!e[SEKAI_SYNTHETIC_KEY] && (Date.now() - lastSyntheticTs) < DEDUP_MS) {
+      e.stopImmediatePropagation();
+    }
+  }, true);
+})();
+</script>
+
+<script>
+(function() {
+  // Track recent touch to block emulated mouse events
+  var lastTouchTime = 0;
+  var TOUCH_MOUSE_DELAY = 200; // ms to block mouse events after touch
+
+  // Global touch tracker - set flag when touch occurs
+  document.addEventListener('touchstart', function() {
+    lastTouchTime = Date.now();
+  }, { passive: true, capture: true });
+
+  document.addEventListener('touchend', function() {
+    lastTouchTime = Date.now();
+  }, { passive: true, capture: true });
+
+  // Block emulated mouse events that follow touch
+  // BUT allow them on focusable elements (inputs need mousedown for focus)
+  function blockEmulatedMouseHandler(e) {
+    if (Date.now() - lastTouchTime < TOUCH_MOUSE_DELAY) {
+      // Don't block on focusable elements - they need mousedown for focus
+      var target = e.target;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return; // Allow the event
+      }
+      e.stopPropagation();
+      // NOTE: Do NOT call preventDefault() here.
+      // CSS user-select:none already handles text selection prevention.
+      // On iOS WKWebView, mousedown.preventDefault() can intermittently
+      // suppress click event synthesis, breaking .onclick handlers.
+    }
+  }
+
+  // Capture phase blockers for emulated mouse events
+  document.addEventListener('mousedown', blockEmulatedMouseHandler, { capture: true });
+
+  // Patch addEventListener to force passive on touch events.
+  // Expose original globally so SCROLL_BLOCK_SCRIPT can register a
+  // non-passive touchmove handler to block iOS WKWebView parent scroll.
+  var originalAddEventListener = EventTarget.prototype.addEventListener;
+  window.__sekai_orig_ael = originalAddEventListener;
+
+  EventTarget.prototype.addEventListener = function(type, listener, options) {
+    // Convert touchstart/touchmove to passive
+    // Mouse event emulation is handled by our global blockers above
+    if (type === 'touchstart' || type === 'touchmove') {
+      var newOptions = Object.assign({}, options || {}, { passive: true });
+      return originalAddEventListener.call(this, type, listener, newOptions);
+    }
+    return originalAddEventListener.call(this, type, listener, options);
+  };
+})();
+</script>
+
+<script>
+(function() {
+  // Track if dom_ready was already sent
+  var domReadySent = false;
+
+  function sendDomReady() {
+    if (domReadySent) return;
+    domReadySent = true;
+    window.parent.postMessage({ type: 'sekai_iframe_dom_ready' }, '*');
+  }
+
+  // Send dom_ready when DOMContentLoaded fires
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', sendDomReady);
+  } else {
+    // DOM already loaded
+    sendDomReady();
+  }
+
+  // Helper to serialize message - handles objects that would become [object Object]
+  function serializeMessage(msg) {
+    if (msg === null || msg === undefined) return '';
+    if (typeof msg === 'string') return msg;
+    if (typeof msg === 'object') {
+      try {
+        return JSON.stringify(msg);
+      } catch (e) {
+        return String(msg);
+      }
+    }
+    return String(msg);
+  }
+
+  // Catch JS errors and send to parent
+  window.onerror = function(message, source, lineno, colno, error) {
+    window.parent.postMessage({
+      type: 'sekai_iframe_js_error',
+      message: serializeMessage(message),
+      source: source || '',
+      lineno: lineno || 0,
+      colno: colno || 0,
+      errorName: error ? error.name : '',
+      errorStack: error ? error.stack : ''
+    }, '*');
+    // Return false to allow default error handling
+    return false;
+  };
+
+  // Also catch unhandled promise rejections
+  window.addEventListener('unhandledrejection', function(event) {
+    var reason = event.reason;
+    var isError = reason instanceof Error;
+    window.parent.postMessage({
+      type: 'sekai_iframe_js_error',
+      message: reason ? serializeMessage(reason) : 'Unhandled promise rejection',
+      source: 'unhandledrejection',
+      lineno: 0,
+      colno: 0,
+      errorName: isError ? reason.name : '',
+      errorStack: isError ? reason.stack : ''
+    }, '*');
+  });
+})();
+</script>
+
+<script>
+(function() {
+  // Collect all devicemotion listeners registered by game code
+  var deviceMotionListeners = [];
+
+  // Save original addEventListener
+  var originalAddEventListener = window.addEventListener;
+
+  // Intercept addEventListener to capture devicemotion listeners
+  window.addEventListener = function(type, listener, options) {
+    if (type === 'devicemotion' && typeof listener === 'function') {
+      deviceMotionListeners.push(listener);
+      // Also add to native in case permission is granted elsewhere
+      return originalAddEventListener.call(this, type, listener, options);
+    }
+    return originalAddEventListener.call(this, type, listener, options);
+  };
+
+  // Also intercept removeEventListener
+  var originalRemoveEventListener = window.removeEventListener;
+  window.removeEventListener = function(type, listener, options) {
+    if (type === 'devicemotion' && typeof listener === 'function') {
+      var index = deviceMotionListeners.indexOf(listener);
+      if (index !== -1) {
+        deviceMotionListeners.splice(index, 1);
+      }
+    }
+    return originalRemoveEventListener.call(this, type, listener, options);
+  };
+
+  // Listen for forwarded motion data from parent
+  window.addEventListener('message', function(event) {
+    if (!event.data || event.data.type !== '__sekai_device_motion__') return;
+
+    var data = event.data;
+
+    // Create a synthetic event-like object
+    var syntheticEvent = {
+      accelerationIncludingGravity: data.accelerationIncludingGravity,
+      acceleration: data.acceleration,
+      rotationRate: data.rotationRate,
+      interval: data.interval || 16,
+      // Make it look like a real event
+      type: 'devicemotion',
+      timeStamp: data.timestamp || Date.now(),
+      target: window,
+      currentTarget: window,
+      preventDefault: function() {},
+      stopPropagation: function() {},
+      stopImmediatePropagation: function() {}
+    };
+
+    // Trigger all registered listeners
+    deviceMotionListeners.forEach(function(listener) {
+      try {
+        listener(syntheticEvent);
+      } catch (e) {
+        // Ignore listener errors
+      }
+    });
+  });
+})();
+</script>
+
+<script>
+(function() {
+  // Track all AudioContexts created in this iframe
+  var audioContexts = [];
+  var originalAudioContext = window.AudioContext || window.webkitAudioContext;
+
+  if (originalAudioContext) {
+    // Patch AudioContext constructor to track instances and enforce initial mute state.
+    // If isMuted is true when the context is created, suspend it immediately so that
+    // AudioNode sources cannot produce audio before the parent sends receive_audio_mute.
+    // This closes the race window between iframe load start and the first mute message.
+    var PatchedAudioContext = function() {
+      var ctx = new originalAudioContext();
+      audioContexts.push(ctx);
+      // Per-ctx diagnostic flags. Each AudioContext instance warns at most
+      // once for each of the two diagnostics below, so a rAF-driven
+      // resume() loop (observed in real games) does not spam vconsole,
+      // while new contexts still act as fresh sentinels.
+      var resumeBlockWarned = false;
+      var browserResumeWarned = false;
+      if (typeof ctx.resume === 'function') {
+        var originalCtxResume = ctx.resume.bind(ctx);
+        ctx.resume = function() {
+          if (isMuted) {
+            // Game code attempted to resume AudioContext during mute window.
+            // Blocked here prevents the audibility observer from reporting a
+            // false playing_started. Logged once per ctx to confirm the
+            // "game code calls resume()" leak path is real.
+            if (!resumeBlockWarned) {
+              resumeBlockWarned = true;
+              try {
+                console.warn(
+                  '[sekai-iframe-audio] AudioContext.resume() blocked while muted (once per ctx)'
+                );
+              } catch (e) {}
+            }
+            return Promise.resolve();
+          }
+          return originalCtxResume();
+        };
+      }
+      if (isMuted) {
+        ctx.suspend().catch(function() {});
+      }
+      // Feed perf audibility observer: re-evaluate whenever the context
+      // transitions between suspended/running/closed. ctx.suspend()/resume()
+      // resolve asynchronously, so the statechange event is the only reliable
+      // signal that the context has actually moved.
+      try {
+        ctx.addEventListener('statechange', function() {
+          // Sentinel: resume() is blocked above while muted, so if the ctx
+          // still enters 'running' during mute, the only remaining cause is
+          // browser-initiated state recovery (e.g. iOS audio session
+          // interruption ending). If this log ever appears in practice, the
+          // resume() block alone is not enough — we must also guard
+          // notifyAudibilityChange() to suppress audible=true while muted.
+          // Logged once per ctx to avoid repeated warnings on oscillating
+          // state transitions.
+          if (ctx.state === 'running' && isMuted && !browserResumeWarned) {
+            browserResumeWarned = true;
+            try {
+              console.warn(
+                '[sekai-iframe-audio] AudioContext entered running while muted (browser-initiated, once per ctx)'
+              );
+            } catch (e) {}
+          }
+          scheduleAudibilityCheck();
+        });
+      } catch (e) {
+        // Ignore listener attach failures on non-conforming contexts
+      }
+      return ctx;
+    };
+    PatchedAudioContext.prototype = originalAudioContext.prototype;
+    window.AudioContext = PatchedAudioContext;
+    if (window.webkitAudioContext) {
+      window.webkitAudioContext = PatchedAudioContext;
+    }
+  }
+
+  // Track all Audio objects (including those created via new Audio()).
+  //
+  // Held WEAKLY. A game that plays a sound effect by building an Audio per shot
+  // — the idiom our own builder prompt taught for years — drops its reference
+  // immediately, and a strong list here pinned every one of them for the life
+  // of the session: 4,000 effects turned a background/restore into a 29 ms main
+  // thread stall, and none of those elements could ever be collected.
+  //
+  // Weak is not enough on its own: intendedPlaying and pendingResume below
+  // must be weak too, or they hold the elements alive and nothing is collected.
+  // With all three weak, a collection empties them and restore returns to 0 ms.
+  var audioElements = [];
+  var _WeakRefCtor = typeof WeakRef === 'function' ? WeakRef : null;
+
+  /** Track el in list without keeping it alive. */
+  function trackWeakly(list, el) {
+    list.push(_WeakRefCtor ? new _WeakRefCtor(el) : el);
+  }
+
+  /**
+   * The still-reachable elements of list, compacting it in place.
+   *
+   * Reachability is the ONLY test. An earlier version also dropped finished
+   * one-shots that had left the document, on the reasoning that they can no
+   * longer be heard — but a sound object the game builds once and replays
+   * looks exactly like that between plays, so it would be dropped and then
+   * never muted again when the app went to the background. Leaving it to the
+   * collector is simpler and correct: whatever the game can still reach stays
+   * tracked, whatever it cannot is silent by definition.
+   */
+  function liveElements(list) {
+    var live = [];
+    var kept = [];
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i];
+      var el = (_WeakRefCtor && entry && typeof entry.deref === 'function')
+        ? entry.deref()
+        : entry;
+      if (!el) continue;
+      kept.push(entry);
+      live.push(el);
+    }
+    list.length = 0;
+    for (var k = 0; k < kept.length; k++) list.push(kept[k]);
+    return live;
+  }
+
+  var originalAudio = window.Audio;
+  
+  function rememberMutedState(el) {
+    if (!el) return;
+    try {
+      if (!mutedElements.has(el)) {
+        mutedElements.set(el, !!el.muted);
+      }
+    } catch (e) {
+      // Ignore muted state snapshot failures
+    }
+  }
+
+  // ── Per-URL voice recycling ────────────────────────────────────────────
+  //
+  // The idiom our builder taught for years is new Audio(url).play() on every
+  // shot. Each call allocates a media element and a decoder; a drawing game
+  // makes five a second for as long as the player draws, and on a phone those
+  // native resources are what runs out - the game gets slower the longer it is
+  // played. The games that do this already shipped and will not be rebuilt, so
+  // the only place left to fix it is here, at the constructor.
+  //
+  // When a game asks for a URL it has asked for before, and a previous voice
+  // for that URL has FINISHE
